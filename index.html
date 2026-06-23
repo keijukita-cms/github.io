@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CMS HUB Modern</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Import Maps for React & Firebase -->
+  <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "lucide-react": "https://esm.sh/lucide-react@0.292.0",
+        "firebase/app": "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js",
+        "firebase/auth": "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js",
+        "firebase/firestore": "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js"
+      }
+    }
+  </script>
+  
+  <!-- Babel for JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-50 font-sans text-slate-800 tracking-tight m-0 p-0 overflow-hidden">
+  
+  <div id="root"></div>
+
+  <!-- data-presets="react" を追加し、内部で従来の変換方式を使用 -->
+  <script type="text/babel" data-type="module" data-presets="react">
+    /** @jsx React.createElement */
+    /** @jsxFrag React.Fragment */
+
+    import React, { useState, useEffect, useRef } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { initializeApp } from 'firebase/app';
+    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+    import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
+    import { 
+      Plus, Calendar, CheckSquare, MessageSquare, ListTodo, User, Trash2,
+      Users, Link as LinkIcon, Image as ImageIcon, ExternalLink, X, AlertCircle,
+      Timer, ClipboardCheck, Zap, Ear, Waves, Sparkles, Loader2, FileText
+    } from 'lucide-react';
+
+    // --- Firebase Configuration ---
+    const injectedConfig = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
+    // ⚠️ 実際に運用する際は、ここにFirebaseのConfig情報を入力してください
+    const firebaseConfig = injectedConfig ? JSON.parse(injectedConfig) : {
+        apiKey: "YOUR_API_KEY",
+        authDomain: "YOUR_PROJECT.firebaseapp.com",
+        projectId: "YOUR_PROJECT_ID",
+        storageBucket: "YOUR_PROJECT.appspot.com",
+        messagingSenderId: "YOUR_SENDER_ID",
+        appId: "YOUR_APP_ID"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'cms-meeting-hub-modern';
+
+    // --- UI Components ---
+    const SectionBlock = ({ title, icon: Icon, children }) => (
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden mb-8">
+        <div className="bg-slate-900 px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            {Icon && <Icon size={16} className="text-blue-400" />}
+            <h2 className="text-white font-bold text-sm tracking-widest uppercase">{title}</h2>
+          </div>
+        </div>
+        <div className="p-6">
+          {children}
+        </div>
+      </div>
+    );
+
+    const App = () => {
+      // ⚠️ Gemini APIキーをここに設定してください
+      const apiKey = ""; 
+
+      // --- States ---
+      const [user, setUser] = useState(null);
+      const [meetings, setMeetings] = useState([]);
+      const [activeId, setActiveId] = useState(null);
+      const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+      const [isAiLoading, setIsAiLoading] = useState(false);
+      const [aiLoadingMessage, setAiLoadingMessage] = useState("");
+      const [modal, setModal] = useState({ isOpen: false, title: '', type: '', onConfirm: () => {}, inputValue: '', inputTitle: '' });
+      const [notification, setNotification] = useState({ show: false, message: '', type: 'success' });
+      const [audioFile, setAudioFile] = useState(null);
+      const [previewImage, setPreviewImage] = useState(null);
+
+      // --- Refs ---
+      const audioInputRef = useRef(null);
+      const imageInputRef = useRef(null);
+      const syncTimeoutRef = useRef(null);
+
+      // --- Auth & Data Sync ---
+      useEffect(() => {
+        const initAuth = async () => {
+          const initToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+          if (initToken) {
+            await signInWithCustomToken(auth, initToken);
+          } else {
+            await signInAnonymously(auth);
+          }
+        };
+        initAuth();
+        const unsubscribe = onAuthStateChanged(auth, setUser);
+        return () => unsubscribe();
+      }, []);
+
+      useEffect(() => {
+        if (!user) return;
+        const meetingsCol = collection(db, 'artifacts', appId, 'public', 'data', 'meetings');
+        const unsubscribe = onSnapshot(meetingsCol, (snapshot) => {
+          const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+          const sorted = docs.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
+          setMeetings(sorted);
+          if (sorted.length > 0 && !activeId) setActiveId(sorted[0].id);
+        });
+        return () => unsubscribe();
+      }, [user, activeId]);
+
+      const activeMeeting = meetings.find(m => m.id === activeId) || (meetings.length > 0 ? meetings[0] : null);
+
+      // --- Helpers ---
+      const showNotification = (message, type = 'success') => {
+        setNotification({ show: true, message, type });
+        setTimeout(() => setNotification({ show: false, message: '', type: 'success' }), 3000);
+      };
+
+      const updateMeetingLocallyAndCloud = (updatedData) => {
+        if (!activeId) return;
+        setMeetings(prev => prev.map(m => m.id === activeId ? { ...m, ...updatedData } : m));
+        if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+        syncTimeoutRef.current = setTimeout(async () => {
+          try {
+            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'meetings', activeId), updatedData);
+          } catch (e) { console.error("Sync Error:", e); }
+        }, 500);
+      };
+
+      // --- AI Logic (Gemini 1.5 Flash) ---
+      const fetchGemini = async (payload) => {
+        if (!apiKey) { showNotification("Gemini APIキーが設定されていません", "error"); return null; }
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+        const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        if (!response.ok) throw new Error("API Error");
+        return await response.json();
+      };
+
+      const handleTranscribeAudio = async () => {
+        if (!audioFile) return;
+        setIsAiLoading(true); setAiLoadingMessage("音声を一括解析中...");
+        try {
+          const reader = new FileReader();
+          reader.onload = async () => {
+            const result = reader.result;
+            const base64Data = result.split(',')[1];
+            const res = await fetchGemini({
+              contents: [{ parts: [{ inlineData: { mimeType: audioFile.type || "audio/wav", data: base64Data } }, { text: "この音声を一言一句正確に文字起こししてください。" }] }]
+            });
+            if (res) {
+              const text = res.candidates?.[0]?.content?.parts?.[0]?.text || "";
+              updateMeetingLocallyAndCloud({ rawTranscript: text });
+              showNotification("文字起こし完了");
+            }
+            setIsAiLoading(false);
+          };
+          reader.readAsDataURL(audioFile);
+        } catch (e) {
+          showNotification("文字起こし失敗: サイズが大きすぎる可能性があります", "error");
+          setIsAiLoading(false);
+        }
+      };
+
+      const handleGenerateMinutes = async () => {
+        if (!activeMeeting?.rawTranscript) { showNotification("文字起こしデータがありません", "error"); return; }
+        setIsAiLoading(true); setAiLoadingMessage("戦略的議事録を構築中...");
+        const prompt = `
+          あなたは株式会社CMSの戦略顧問です。以下の情報を統合し、構造化された議事録を作成してください。
+          ■ 基本データ: 日時: ${activeMeeting.date}, タイトル: ${activeMeeting.title}, 参加者: ${activeMeeting.participants}
+          ■ メモ: ${activeMeeting.discussionNotes}
+          ■ 文字起こし: ${activeMeeting.rawTranscript}
+          出力は決定事項とネクストアクションを明確にしたマークダウン形式としてください。
+        `;
+        try {
+          const res = await fetchGemini({ contents: [{ parts: [{ text: prompt }] }] });
+          if (res) {
+            const text = res.candidates?.[0]?.content?.parts?.[0]?.text || "";
+            updateMeetingLocallyAndCloud({ officialMinutes: text });
+            showNotification("議事録生成完了");
+          }
+        } catch (e) { showNotification("生成エラー", "error"); }
+        finally { setIsAiLoading(false); }
+      };
+
+      const handleAddNewMeeting = async () => {
+        const newMeetingData = {
+          date: new Date().toISOString().split('T')[0], title: '新規ミーティング', participants: '',
+          agendas: [{ id: Date.now().toString(), text: 'トピック', duration: '15' }], tasks: [], discussionNotes: '', rawTranscript: '', officialMinutes: '', attachments: []
+        };
+        const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'meetings'), newMeetingData);
+        setActiveId(docRef.id);
+      };
+
+      // --- Handlers ---
+      const handleImageUpload = (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const r = new FileReader();
+        r.onload = (ev) => {
+          const img = new Image(); 
+          img.src = ev.target?.result;
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            const max = 800; let w = img.width, h = img.height;
+            if (w > max || h > max) { if (w > h) { h *= max / w; w = max; } else { w *= max / h; h = max; } }
+            canvas.width = w; canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            if(ctx) {
+                ctx.drawImage(img, 0, 0, w, h);
+                const compressed = canvas.toDataURL('image/jpeg', 0.6);
+                updateMeetingLocallyAndCloud({ attachments: [...(activeMeeting?.attachments || []), { id: Date.now().toString(), type: 'image', content: compressed.split(',')[1], mimeType: 'image/jpeg', title: file.name }] });
+            }
+          };
+        };
+        r.readAsDataURL(file);
+      };
+
+      const handleAddLink = () => {
+        if (!modal.inputValue) return;
+        updateMeetingLocallyAndCloud({ attachments: [...(activeMeeting?.attachments || []), { id: Date.now().toString(), type: 'link', content: modal.inputValue, title: modal.inputTitle || modal.inputValue }] });
+        setModal({ isOpen: false, title: '', type: '', onConfirm: null, inputValue: '', inputTitle: '' });
+      };
+
+      if (!user) return <div className="h-screen flex items-center justify-center font-bold text-slate-400">Loading CMS Cloud...</div>;
+
+      return (
+        <div className="flex h-screen w-full bg-slate-50 font-sans text-slate-800 tracking-tight">
+          {/* Hidden Inputs */}
+          <input type="file" ref={audioInputRef} className="hidden" accept="audio/*" onChange={(e) => setAudioFile(e.target.files?.[0] || null)} />
+          <input type="file" ref={imageInputRef} className="hidden" accept="image/*" onChange={handleImageUpload} />
+
+          {/* Sidebar */}
+          <div className={`${isSidebarOpen ? 'w-72' : 'w-16'} bg-white border-r border-slate-200 transition-all flex flex-col shrink-0 z-20`}>
+            <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+              {isSidebarOpen && <h1 className="font-black text-xl tracking-tighter text-slate-900">CMS HUB <span className="text-xs text-slate-400 font-normal">Modern</span></h1>}
+              <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 text-slate-400 hover:text-slate-900 rounded"><Users size={20} /></button>
+            </div>
+            <div className="p-4">
+              <button onClick={handleAddNewMeeting} className="w-full py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-sm flex items-center justify-center gap-2">
+                <Plus size={18} /> {isSidebarOpen && "New Meeting"}
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-3 space-y-1">
+              {meetings.map(m => (
+                <button key={m.id} onClick={() => setActiveId(m.id)} className={`w-full p-3 rounded-lg text-left truncate font-bold text-sm transition-all ${activeId === m.id ? 'bg-slate-100 text-slate-900 shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}>
+                  <div className="text-xs text-slate-400 mb-0.5">{m.date}</div>
+                  {String(m.title || 'Untitled')}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Main Content */}
+          <div className="flex-1 overflow-y-auto p-8 lg:p-12">
+            {!activeMeeting ? (
+              <div className="h-full flex items-center justify-center text-slate-400 font-bold">ミーティングを選択してください</div>
+            ) : (
+              <div className="max-w-5xl mx-auto pb-24">
+                {/* Header / Basic Info */}
+                <div className="flex items-start justify-between mb-8">
+                  <div className="flex-1 pr-8">
+                    <input type="text" value={activeMeeting.title || ''} onChange={(e) => updateMeetingLocallyAndCloud({ title: e.target.value })} className="text-3xl font-black bg-transparent border-none w-full p-0 text-slate-900 focus:outline-none focus:ring-0 mb-4" placeholder="Meeting Title" />
+                    <div className="flex flex-wrap items-center gap-4">
+                      <div className="flex items-center gap-2 bg-white px-4 py-2 rounded-lg border border-slate-200 shadow-sm">
+                        <Calendar size={16} className="text-slate-400" />
+                        <input type="date" value={activeMeeting.date || ''} onChange={(e) => updateMeetingLocallyAndCloud({ date: e.target.value })} className="bg-transparent border-none p-0 focus:outline-none focus:ring-0 text-sm font-bold text-slate-700" />
+                      </div>
+                      <div className="flex items-center gap-2 bg-white px-4 py-2 rounded-lg border border-slate-200 shadow-sm flex-1 min-w-[200px]">
+                        <User size={16} className="text-slate-400" />
+                        <input type="text" value={activeMeeting.participants || ''} onChange={(e) => updateMeetingLocallyAndCloud({ participants: e.target.value })} className="bg-transparent border-none p-0 focus:outline-none focus:ring-0 text-sm font-bold text-slate-700 w-full" placeholder="Participants..." />
+                      </div>
+                    </div>
+                  </div>
+                  <button onClick={() => setModal({isOpen:true, title:'削除', type:'delete', onConfirm:async()=>{await deleteDoc(doc(db,'artifacts',appId,'public','data','meetings',activeId)); setActiveId(null); setModal({...modal, isOpen:false}); showNotification("削除しました");}, inputTitle:'', inputValue:''})} className="p-3 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all shrink-0"><Trash2 size={20} /></button>
+                </div>
+
+                {/* BLOCK 1: Agenda */}
+                <SectionBlock title="1. Agenda Planning" icon={MessageSquare}>
+                  <div className="space-y-2">
+                    {(activeMeeting.agendas || []).map((agenda, idx) => (
+                      <div key={agenda.id} className="flex flex-wrap sm:flex-nowrap items-center gap-3 group">
+                        <span className="text-slate-300 font-bold text-sm w-6 shrink-0">{idx + 1}.</span>
+                        <input className="flex-1 min-w-[150px] bg-slate-50 border border-slate-200 rounded-lg px-4 py-2 text-sm font-bold focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all" value={agenda.text || ''} onChange={(e) => {
+                          const newA = [...activeMeeting.agendas]; newA[idx].text = e.target.value; updateMeetingLocallyAndCloud({ agendas: newA });
+                        }} placeholder="Topic..." />
+                        <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 shrink-0">
+                          <Timer size={14} className="text-slate-400" />
+                          <input type="number" step="5" min="5" className="w-16 bg-transparent border-none outline-none p-0 text-right text-sm font-bold focus:outline-none focus:ring-0" value={agenda.duration || '15'} onChange={(e)=>{
+                             const newA = [...activeMeeting.agendas]; newA[idx].duration = e.target.value; updateMeetingLocallyAndCloud({ agendas: newA });
+                          }} />
+                          <span className="text-xs font-bold text-slate-400">Min</span>
+                        </div>
+                        <button onClick={() => { const newA = activeMeeting.agendas.filter(a => a.id !== agenda.id); updateMeetingLocallyAndCloud({ agendas: newA }); }} className="text-slate-300 hover:text-red-500 p-2 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0"><X size={16} /></button>
+                      </div>
+                    ))}
+                    <button onClick={() => updateMeetingLocallyAndCloud({ agendas: [...(activeMeeting.agendas || []), { id: Date.now().toString(), text: '', duration: '15' }] })} className="mt-4 flex items-center gap-2 text-sm font-bold text-blue-600 hover:text-blue-800 transition-colors"><Plus size={16}/> Add Topic</button>
+                  </div>
+                </SectionBlock>
+
+                {/* BLOCK 2: Action Items */}
+                <SectionBlock title="2. Action Items" icon={ListTodo}>
+                  <div className="space-y-2">
+                    {(activeMeeting.tasks || []).map((task, idx) => (
+                      <div key={task.id} className={`flex flex-wrap sm:flex-nowrap items-center gap-3 group ${task.completed ? 'opacity-50' : ''}`}>
+                        <button onClick={() => {
+                          const newT = [...activeMeeting.tasks]; newT[idx].completed = !newT[idx].completed; updateMeetingLocallyAndCloud({ tasks: newT });
+                        }} className={`shrink-0 ${task.completed ? 'text-blue-600' : 'text-slate-300'}`}><CheckSquare size={20} /></button>
+                        <input className={`flex-1 min-w-[150px] bg-slate-50 border border-slate-200 rounded-lg px-4 py-2 text-sm font-bold focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 ${task.completed ? 'line-through' : ''}`} value={task.text || ''} onChange={(e) => {
+                          const newT = [...activeMeeting.tasks]; newT[idx].text = e.target.value; updateMeetingLocallyAndCloud({ tasks: newT });
+                        }} placeholder="Task description..." />
+                        <input className="w-full sm:w-32 bg-slate-50 border border-slate-200 rounded-lg px-4 py-2 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500" value={task.assignee || ''} onChange={(e)=>{
+                          const newT = [...activeMeeting.tasks]; newT[idx].assignee = e.target.value; updateMeetingLocallyAndCloud({ tasks: newT });
+                        }} placeholder="Assignee" />
+                        <input type="date" className="w-full sm:w-auto bg-slate-50 border border-slate-200 rounded-lg px-4 py-2 text-sm font-bold text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500" value={task.deadline || ''} onChange={(e)=>{
+                          const newT = [...activeMeeting.tasks]; newT[idx].deadline = e.target.value; updateMeetingLocallyAndCloud({ tasks: newT });
+                        }} />
+                        <button onClick={() => { const newT = activeMeeting.tasks.filter(t => t.id !== task.id); updateMeetingLocallyAndCloud({ tasks: newT }); }} className="text-slate-300 hover:text-red-500 p-2 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0"><X size={16} /></button>
+                      </div>
+                    ))}
+                    <button onClick={() => updateMeetingLocallyAndCloud({ tasks: [...(activeMeeting.tasks || []), { id: Date.now().toString(), text: '', assignee: '', deadline: '', completed: false }] })} className="mt-4 flex items-center gap-2 text-sm font-bold text-emerald-600 hover:text-emerald-800 transition-colors"><Plus size={16}/> Add Task</button>
+                  </div>
+                </SectionBlock>
+
+                {/* BLOCK 3: Discussion & Assets */}
+                <SectionBlock title="3. Discussion & Assets" icon={FileText}>
+                  <div className="flex gap-4 mb-4">
+                    <button onClick={() => imageInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-sm font-bold text-slate-700 transition-colors"><ImageIcon size={16} /> Add Image</button>
+                    <button onClick={() => setModal({isOpen: true, title: 'Add Link', type: 'link', inputValue: '', inputTitle: '', onConfirm: null})} className="flex items-center gap-2 px-4 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-sm font-bold text-slate-700 transition-colors"><LinkIcon size={16} /> Add URL</button>
+                  </div>
+                  
+                  {(activeMeeting.attachments || []).length > 0 && (
+                    <div className="flex flex-wrap gap-4 mb-6 p-4 bg-slate-50 rounded-xl border border-slate-200">
+                      {activeMeeting.attachments.map(a => (
+                        <div key={a.id} className="relative group shrink-0">
+                           <div onClick={() => a.type === 'image' ? setPreviewImage(a) : window.open(a.content, '_blank')} className="w-24 h-16 bg-white border border-slate-300 rounded-lg overflow-hidden shadow-sm cursor-pointer flex items-center justify-center hover:border-blue-500 transition-colors">
+                             {a.type === 'image' ? <img src={`data:${a.mimeType};base64,${a.content}`} className="w-full h-full object-cover" /> : <div className="flex flex-col items-center gap-1 text-blue-600"><ExternalLink size={14} /><span className="text-[10px] font-bold truncate w-20 text-center">{String(a.title)}</span></div>}
+                           </div>
+                           <button onClick={(e) => { e.stopPropagation(); const newA = activeMeeting.attachments.filter(att => att.id !== a.id); updateMeetingLocallyAndCloud({ attachments: newA }); }} className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shadow-md"><X size={12} /></button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  
+                  <textarea className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-medium text-sm leading-relaxed focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all h-40 resize-y" value={activeMeeting.discussionNotes || ''} onChange={(e) => updateMeetingLocallyAndCloud({ discussionNotes: e.target.value })} placeholder="Type discussion notes here... (Enter goes to next line)" />
+                </SectionBlock>
+
+                {/* BLOCK 4: AI Audio Transcript */}
+                <SectionBlock title="4. Transcript (AI)" icon={Ear}>
+                  <div className="flex flex-wrap items-center justify-between gap-4 mb-4 bg-blue-50 p-4 rounded-xl border border-blue-100">
+                    <div className="flex items-center gap-4 w-full sm:w-auto">
+                      <button onClick={() => audioInputRef.current?.click()} className="px-4 py-2 bg-white border border-blue-200 text-blue-700 rounded-lg text-sm font-bold hover:bg-blue-100 transition-colors flex items-center gap-2 w-full sm:w-auto justify-center">
+                         <Waves size={16} /> {audioFile ? audioFile.name : "Select Audio"}
+                      </button>
+                    </div>
+                    <button onClick={handleTranscribeAudio} disabled={!audioFile} className={`px-6 py-2 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all w-full sm:w-auto ${audioFile ? "bg-blue-600 text-white shadow-md hover:bg-blue-700" : "bg-slate-200 text-slate-400 cursor-not-allowed"}`}>
+                      <Zap size={16} /> Start Scan
+                    </button>
+                  </div>
+                  <textarea className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-medium text-sm leading-relaxed focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all h-48 resize-y" value={activeMeeting.rawTranscript || ''} onChange={(e) => updateMeetingLocallyAndCloud({ rawTranscript: e.target.value })} placeholder="AI transcript will appear here..." />
+                </SectionBlock>
+
+                {/* BLOCK 5: Official Minutes */}
+                <SectionBlock title="5. Strategic Minutes" icon={ClipboardCheck}>
+                   <div className="mb-4">
+                     <button onClick={handleGenerateMinutes} className="px-6 py-3 bg-slate-900 text-white rounded-lg text-sm font-bold flex items-center gap-2 hover:bg-blue-700 transition-colors shadow-md w-full sm:w-auto justify-center">
+                        <Sparkles size={16} /> Generate Strategic Minutes
+                     </button>
+                   </div>
+                   <textarea className="w-full p-6 bg-slate-50 border border-slate-200 rounded-xl font-medium text-sm leading-relaxed focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all h-64 resize-y" value={activeMeeting.officialMinutes || ''} onChange={(e) => updateMeetingLocallyAndCloud({ officialMinutes: e.target.value })} placeholder="Generated structured minutes will appear here..." />
+                </SectionBlock>
+
+              </div>
+            )}
+          </div>
+
+          {/* Modals & Overlays */}
+          {isAiLoading && (
+            <div className="fixed inset-0 z-[500] bg-slate-900/80 flex flex-col items-center justify-center backdrop-blur-sm">
+              <Loader2 className="text-white animate-spin mb-4" size={48} />
+              <p className="font-bold text-lg text-white">{aiLoadingMessage}</p>
+            </div>
+          )}
+
+          {previewImage && (
+            <div className="fixed inset-0 z-[1000] bg-slate-900/95 flex items-center justify-center p-10 backdrop-blur-sm" onClick={() => setPreviewImage(null)}>
+              <button className="absolute top-10 right-10 text-white bg-slate-800 p-2 rounded-full hover:bg-slate-700"><X size={32} /></button>
+              <img src={`data:${previewImage.mimeType};base64,${previewImage.content}`} className="max-h-[85vh] w-auto shadow-2xl rounded-lg" onClick={(e) => e.stopPropagation()} />
+            </div>
+          )}
+
+          {modal.isOpen && (
+            <div className="fixed inset-0 z-[600] bg-slate-900/60 flex items-center justify-center p-6 backdrop-blur-sm px-4">
+              <div className="bg-white max-w-md w-full p-8 shadow-2xl rounded-2xl">
+                <h3 className="text-xl font-bold mb-6 text-slate-900">{modal.title}</h3>
+                {modal.type === 'link' ? (
+                  <div className="space-y-4 mb-8">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 mb-1">Title (Optional)</label>
+                      <input type="text" value={modal.inputTitle} onChange={(e) => setModal({...modal, inputTitle: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-lg p-3 font-bold focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Reference Name" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 mb-1">URL (Required)</label>
+                      <input type="text" value={modal.inputValue} onChange={(e) => setModal({...modal, inputValue: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-lg p-3 font-bold focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="https://..." autoFocus />
+                    </div>
+                  </div>
+                ) : (
+                  <p className="font-medium text-slate-700 mb-8">このミーティングを完全に削除します。よろしいですか？</p>
+                )}
+                <div className="flex gap-4 justify-end">
+                  <button onClick={() => setModal({...modal, isOpen:false})} className="px-6 py-2 rounded-lg font-bold text-slate-500 hover:bg-slate-100 transition-colors">Cancel</button>
+                  <button onClick={modal.type === 'link' ? handleAddLink : modal.onConfirm} className={`px-6 py-2 rounded-lg text-white font-bold transition-colors ${modal.type === 'delete' ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'}`}>Confirm</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {notification.show && (
+            <div className="fixed bottom-8 right-8 z-[700] flex items-center gap-3 px-6 py-4 rounded-xl shadow-2xl bg-slate-900 text-white animate-in slide-in-from-bottom-5">
+              <AlertCircle size={20} className={notification.type === 'error' ? 'text-red-400' : 'text-emerald-400'} />
+              <span className="font-bold text-sm">{notification.message}</span>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    const root = createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
